@@ -7,7 +7,7 @@ function playBots(specs, seed) {
   const G = Q.newGame(specs, seed);
   let guard = 0;
   while (!G.over) {
-    Q.rollDice(G); Q.botsWhite(G); Q.botColour(G); Q.finishTurn(G);
+    Q.rollDice(G); Q.botsWhite(G); Q.updateClosed(G); Q.botColour(G); Q.finishTurn(G);
     if (++guard > 500) throw new Error('game does not end');
   }
   return G;

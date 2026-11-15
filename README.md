@@ -3,7 +3,17 @@
 **Play it: https://emilphilipp.github.io/qwixx/** (first load downloads ~30 MB of value tables)
 
 Play Qwixx against 1-5 bots (Patient, Careful, Balanced, Greedy, Expert) and optionally see, for every
-legal move, how many expected final points it gains or loses versus the best option.
+legal move, **your chance to win** if you pick it.
+
+## How the win chances are computed
+
+Score alone is the wrong target: a short game is won with a low score, a long one needs a high score.
+Each label is estimated by simulating the rest of the game 1000 times from that option, with every bot playing its
+real strategy and you playing the Expert line afterwards. All options share the same simulated dice
+(common random numbers), so differences between options are measured precisely. Simulating the players jointly matters:
+their final scores are strongly correlated through the shared dice, closed rows and the shared end of the game,
+so five separately estimated score distributions would give the wrong win probability.
+Calibration check (`node calib.js table 800`): predicted vs. actual win rate agrees within sampling noise.
 
 ## What is in here
 
@@ -43,5 +53,6 @@ Headless bot-vs-bot test: `node test_engine.js table 2000`
 ## Caveats
 
 The "optimal" player is optimal against a simple model of the opponents (game ends with a fixed chance after every turn,
-plus a closure-risk estimate per row), not a true multiplayer equilibrium. The value labels assume a 5-player game
-and are approximate for other table sizes. Rules simplification: row closures and the end-of-game check happen at the end of a turn.
+plus a closure-risk estimate per row), not a true multiplayer equilibrium; the Expert bot maximises expected score, not win chance.
+The win-chance labels use the real bots and table size. The C simulators close rows at the end of a turn;
+the web game follows the official rule (a row locked in the white phase closes before the colour phase).

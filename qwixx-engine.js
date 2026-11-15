@@ -277,15 +277,21 @@
   }
   function botColour(G) {
     const p = G.active, pn = G.plans[p];
-    if (pn && pn.c) return [{ p, ...doMark(G, p, pn.c.row, pn.c.n) }];
+    if (pn && pn.c && !G.closed[pn.c.row]) return [{ p, ...doMark(G, p, pn.c.row, pn.c.n) }];
     return [];
+  }
+  /* official rule: a row locked during the white phase closes at once (its colour die is gone) */
+  function updateClosed(S) {
+    const now = [];
+    for (let i = 0; i < NR; i++) if (!S.closed[i] && S.players.some(pl => RL[pl.rows[i]])) { S.closed[i] = true; now.push(i); }
+    return now;
   }
   /* end of turn: penalty, row closures, game end, advance */
   function finishTurn(G) {
     const ev = { penalty: false, closedNow: [], over: false };
     const a = G.players[G.active];
     if (a.turnMarks === 0) { a.k++; ev.penalty = true; }
-    for (let i = 0; i < NR; i++) if (!G.closed[i] && G.players.some(pl => RL[pl.rows[i]])) { G.closed[i] = true; ev.closedNow.push(i); }
+    ev.closedNow = updateClosed(G);
     if (G.closed.filter(Boolean).length >= 2 || G.players.some(pl => pl.k >= 4)) { G.over = true; ev.over = true; }
     G.turn++; G.phase = G.over ? 'over' : 'idle';
     return ev;
@@ -318,10 +324,62 @@
     return { cells, skip };
   }
 
+  /* ---------- win probability by simulating the rest of the game ----------
+     Everyone plays their real policy (bots: their kind; the human seat: the Expert policy). */
+  function planFor(S, p, active, w1, w2, c) {
+    const pl = S.players[p], kd = BOT_KINDS[pl.kind];
+    if (pl.kind === 'human' || (kd && kd.expert)) return expertPlan(S, p, active, w1, w2, c);
+    return heurPlan(pl.rows, active, w1, w2, c, S.closed, kd.th, kd.pm);
+  }
+  function markL(pl, row, n) { const st = tr(row, pl.rows[row], n); if (st >= 0) { pl.rows[row] = st; pl.tm++; } }
+  const isOver = S => S.closed.filter(Boolean).length >= 2 || S.players.some(pl => pl.k >= 4);
+  function simTurn(S, a, rng) {
+    const d = () => 1 + Math.floor(rng() * 6), w1 = d(), w2 = d(), c = [d(), d(), d(), d()];
+    const plans = S.players.map((pl, p) => planFor(S, p, p === a, w1, w2, c));
+    S.players.forEach((pl, p) => { pl.tm = 0; if (plans[p].w) markL(pl, plans[p].w.row, plans[p].w.n); });
+    updateClosed(S);
+    const A = S.players[a], oc = plans[a].c;
+    if (oc && !S.closed[oc.row]) markL(A, oc.row, oc.n);
+    if (A.tm === 0) A.k++;
+    updateClosed(S);
+  }
+  function bestColour(S, p, d) {          /* Expert colour choice after the white phase */
+    const pl = S.players[p], lam = threats(S, p);
+    let best = null, bv = stateValue(pl.rows, pl.k + (pl.tm === 0 ? 1 : 0), lam);
+    for (let i = 0; i < NR; i++) {
+      if (S.closed[i]) continue;
+      for (let j = 0; j < 2; j++) {
+        if (j && d.w[0] === d.w[1]) break;
+        const n = d.w[j] + d.c[i], st = tr(i, pl.rows[i], n); if (st < 0) continue;
+        const r = pl.rows.slice(); r[i] = st;
+        const v = stateValue(r, pl.k, lam); if (v > bv) { bv = v; best = { row: i, n }; }
+      }
+    }
+    return best;
+  }
+  /* one simulated future after player `me` takes `cand` ({row,n} or null = skip) at `stage`.
+     Returns me's share of the win (1, 1/ties or 0). Same seed => same future dice (common random numbers). */
+  function rollout(G, me, stage, cand, seed) {
+    const S = { players: G.players.map(p => ({ kind: p.kind, rows: p.rows.slice(), k: p.k, tm: p.turnMarks })), closed: G.closed.slice() };
+    const rng = mulberry32(seed), a = G.active, M = S.players[me];
+    if (cand) markL(M, cand.row, cand.n);
+    if (stage === 'white') {
+      updateClosed(S);
+      if (a === me) { const o = bestColour(S, me, G.dice); if (o) markL(M, o.row, o.n); }
+      else { const pn = G.plans[a]; if (pn && pn.c && !S.closed[pn.c.row]) markL(S.players[a], pn.c.row, pn.c.n); }
+    }
+    if (S.players[a].tm === 0) S.players[a].k++;
+    updateClosed(S);
+    let t = G.turn + 1, guard = 0;
+    while (!isOver(S) && guard++ < 400) { simTurn(S, t % S.players.length, rng); t++; }
+    const sc = S.players.map(pl => rowsScore(pl.rows, pl.k)), mx = Math.max(...sc);
+    return sc[me] < mx ? 0 : 1 / sc.filter(x => x === mx).length;
+  }
+
   return {
     NR, DIR, COLORS, BOT_KINDS, RP, RC, RL, Tbl, T, posOf, numAt, tr, skipCost, rowsScore, isTerminal,
     loadTable, loadTableFromDir, setTable, stateValue, threats, enumOptions, heurPlan, expertPlan,
     newGame, rollDice, doMark, whiteOptions, colourOptions, botsWhite, botColour, finishTurn,
-    scoreOf, rowScores, optionValues, whiteSum, Fint, F, KAPPA,
+    scoreOf, rowScores, optionValues, whiteSum, Fint, F, KAPPA, updateClosed, rollout, mulberry32,
   };
 });
