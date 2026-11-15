@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Qwixx vs bots</title>
+<style>
+:root{
+  --bg:#0e131f; --card:#171e2e; --card2:#1d2638; --line:#2a3550; --text:#e8ecf6; --mute:#8d99b5;
+  --red:#e5484d; --yellow:#f2b83d; --green:#2fa36b; --blue:#3b7bf5; --gold:#ffd666; --good:#58d68d; --warn:#f5b041; --bad:#ec7063;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);font:15px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+button{font:inherit;color:inherit;cursor:pointer}
+.app{max-width:760px;margin:0 auto;padding:12px 12px 40px}
+header{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+h1{font-size:20px;margin:0;letter-spacing:.5px;flex:1}
+h1 span{color:var(--red)} h1 span+span{color:var(--yellow)} h1 span+span+span{color:var(--green)} h1 span+span+span+span{color:var(--blue)}
+.pill{background:var(--card);border:1px solid var(--line);border-radius:999px;padding:5px 12px;font-size:13px;color:var(--mute)}
+.pill.on{color:var(--good);border-color:#2c5a45}
+.btn{background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:8px 14px}
+.btn:hover{border-color:#42537c}
+.btn.primary{background:#2f5bd6;border-color:#3d6cf0;font-weight:600}
+.btn.primary:hover{background:#3a69ee}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:10px}
+
+/* opponents */
+#opps{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-bottom:10px}
+.opp{padding:8px 9px;transition:box-shadow .2s,border-color .2s}
+.opp.active{border-color:var(--gold);box-shadow:0 0 0 1px var(--gold) inset}
+.opp .top{display:flex;justify-content:space-between;align-items:baseline;font-size:13px}
+.opp .top b{font-size:14px}.opp .kind{color:var(--mute);font-size:11px}
+.mini{display:grid;grid-template-columns:repeat(11,1fr);gap:2px;margin-top:4px}
+.mini i{aspect-ratio:1;border-radius:2px;background:#222c42;display:block}
+.mini i.m.red{background:var(--red)}.mini i.m.yellow{background:var(--yellow)}.mini i.m.green{background:var(--green)}.mini i.m.blue{background:var(--blue)}
+.mini.closed{opacity:.35}
+.opp .foot{display:flex;justify-content:space-between;margin-top:6px;font-size:12px;color:var(--mute)}
+.pen{display:inline-flex;gap:2px}.pen i{width:9px;height:9px;border:1px solid #556;border-radius:2px}.pen i.x{background:var(--bad);border-color:var(--bad)}
+
+/* dice + status */
+#tablecard{margin-bottom:10px;text-align:center}
+#dice{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;min-height:46px;margin-bottom:8px;align-items:center}
+.sep{width:1px;height:30px;background:var(--line);margin:0 4px}
+.die{width:40px;height:40px;border-radius:9px;display:grid;grid-template:repeat(3,1fr)/repeat(3,1fr);padding:6px;gap:1px;box-shadow:0 2px 0 rgba(0,0,0,.35);background:#f4f6fb}
+.die i{border-radius:50%;background:transparent;width:100%;height:100%}
+.die i.p{background:#1a2030}
+.die.red{background:var(--red)}.die.yellow{background:var(--yellow)}.die.green{background:var(--green)}.die.blue{background:var(--blue)}
+.die.red i.p,.die.green i.p,.die.blue i.p{background:#fff}.die.yellow i.p{background:#2a2000}
+.die.off{opacity:.25;filter:grayscale(1)}
+.die.rolling{animation:roll .45s ease-out}
+@keyframes roll{0%{transform:rotate(-200deg) scale(.4);opacity:0}100%{transform:none;opacity:1}}
+#status{font-size:15px;min-height:22px}
+#status small{display:block;color:var(--mute);font-size:12px;margin-top:2px}
+#actions{display:flex;gap:8px;justify-content:center;margin-top:8px;min-height:38px;flex-wrap:wrap}
+
+/* my board */
+#me{padding:10px}
+.rowwrap{position:relative;margin-bottom:8px;border-radius:12px;padding:6px 6px 6px 6px}
+.rowwrap.red{background:linear-gradient(90deg,#7c1f23,#a62c31)}.rowwrap.yellow{background:linear-gradient(90deg,#8a6a10,#b58a1b)}
+.rowwrap.green{background:linear-gradient(90deg,#13573a,#1f7a53)}.rowwrap.blue{background:linear-gradient(90deg,#1d3f93,#2a5cc8)}
+.cells{display:grid;grid-template-columns:repeat(12,1fr);gap:4px}
+.cell{position:relative;aspect-ratio:1;border:0;border-radius:8px;font-weight:700;font-size:clamp(11px,3.4vw,16px);display:flex;align-items:center;justify-content:center;padding:0;background:rgba(255,255,255,.92);color:#18202f;transition:transform .08s}
+.red .cell{color:#7c1f23}.yellow .cell{color:#6b5008}.green .cell{color:#13573a}.blue .cell{color:#1d3f93}
+.cell.lock{background:rgba(255,255,255,.55);font-size:clamp(11px,3.4vw,15px)}
+.cell.dead{opacity:.28;text-decoration:line-through}
+.cell.marked{background:rgba(0,0,0,.45);color:#fff!important}
+.cell.marked::after{content:"✕";position:absolute;font-size:120%;color:#fff;font-weight:800}
+.cell.marked.lockcell::after{content:"🔒"}
+.cell.legal{outline:3px solid var(--gold);outline-offset:1px;animation:pulse 1.1s infinite;cursor:pointer;opacity:1}
+.cell.legal:hover{transform:scale(1.08)}
+.cell.best{outline-color:#fff;background:#fff8d6}
+@keyframes pulse{50%{outline-color:rgba(255,214,102,.35)}}
+.val{position:absolute;top:-9px;right:-5px;font-size:10px;font-weight:700;border-radius:8px;padding:1px 5px;background:#0c1018;border:1px solid currentColor;line-height:1.3;z-index:2;text-decoration:none;white-space:nowrap}
+.val.g{color:var(--good)}.val.a{color:var(--warn)}.val.r{color:var(--bad)}.val.s{color:var(--gold)}
+.rowinfo{display:flex;justify-content:space-between;font-size:11px;color:rgba(255,255,255,.8);margin:3px 3px 0}
+.rowwrap.closed .cells{opacity:.45}
+.rowwrap.closed::after{content:"closed";position:absolute;right:10px;top:-8px;font-size:10px;background:#0c1018;border-radius:8px;padding:1px 7px;color:var(--mute);border:1px solid var(--line)}
+.meinfo{display:flex;justify-content:space-between;align-items:center;margin-top:6px;gap:10px}
+.meinfo .pen i{width:16px;height:16px;border-radius:4px}
+.total{font-size:22px;font-weight:800}.total small{font-size:12px;color:var(--mute);font-weight:500}
+#log{margin-top:10px;font-size:13px;color:var(--mute);min-height:60px}
+#log div{padding:1px 0}#log div:first-child{color:var(--text)}
+
+/* dialog */
+dialog{background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:16px;padding:18px;max-width:420px;width:calc(100% - 28px)}
+dialog::backdrop{background:rgba(5,8,14,.7)}
+dialog h2{margin:0 0 10px;font-size:18px}
+.field{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:8px 0}
+select,input[type=range]{background:var(--card2);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:5px 8px;font:inherit}
+input[type=range]{padding:0;width:140px}
+.hint{color:var(--mute);font-size:12px;margin-top:8px}
+.rank{display:flex;justify-content:space-between;padding:6px 8px;border-radius:8px;margin:3px 0;background:var(--card2)}
+.rank.me{outline:1px solid var(--gold)}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1><span>Q</span><span>W</span><span>I</span><span>X</span>X</h1>
+    <span id="tblstat" class="pill">loading values…</span>
+    <button class="btn" id="btnValues" title="Show the expected-score value of each option">Values</button>
+    <button class="btn" id="btnNew">New game</button>
+  </header>
+  <div id="opps"></div>
+  <div id="tablecard" class="card">
+    <div id="dice"></div>
+    <div id="status"></div>
+    <div id="actions"></div>
+  </div>
+  <div id="me" class="card"></div>
+  <div id="log"></div>
+</div>
+
+<dialog id="setup">
+  <h2>New game</h2>
+  <div class="field"><span>Bots</span><span><input id="nbots" type="range" min="1" max="5" value="3"> <b id="nbotsv">3</b></span></div>
+  <div id="botsel"></div>
+  <div class="field"><span>Show option values</span><input id="optvals" type="checkbox" checked></div>
+  <p class="hint">Values = expected change of your final score vs. the best option (DP table + closure-risk correction, tuned for a 5-player game). ★ = best.</p>
+  <div style="text-align:right;margin-top:12px"><button class="btn primary" id="btnStart">Start</button></div>
+</dialog>
+<dialog id="endd"><h2 id="endt">Game over</h2><div id="ranks"></div><div style="text-align:right;margin-top:12px"><button class="btn primary" id="btnAgain">Play again</button></div></dialog>
+
+<script src="qwixx-engine.js"></script>
+<script>
+const Q = window.Qwixx, $ = s => document.querySelector(s);
+const sleep = ms => new Promise(r => setTimeout(r, window.__fast ? 0 : ms));
+const NAMES = ['Ada', 'Bo', 'Cy', 'Di', 'Eli'];
+const DEFAULT_KINDS = ['expert', 'balanced', 'careful', 'greedy', 'patient'];
+let G = null, showVals = true, pending = null, gameId = 0, tableOK = false;
+
+/* ---------- value tables ---------- */
+Q.loadTable('table/', f => { $('#tblstat').textContent = 'loading values ' + Math.round(f * 100) + '%'; })
+  .then(() => { tableOK = true; $('#tblstat').textContent = 'values ready'; $('#tblstat').classList.add('on'); render(); })
+  .catch(e => { $('#tblstat').textContent = 'no value tables'; $('#tblstat').title = String(e); });
+
+/* ---------- setup ---------- */
+function buildBotSelectors() {
+  const n = +$('#nbots').value; $('#nbotsv').textContent = n;
+  const keep = [...document.querySelectorAll('#botsel select')].map(s => s.value);
+  $('#botsel').innerHTML = Array.from({ length: n }, (_, i) =>
+    `<div class="field"><span>${NAMES[i]}</span><select>${Object.entries(Q.BOT_KINDS).map(([k, v]) =>
+      `<option value="${k}" ${(keep[i] || DEFAULT_KINDS[i]) === k ? 'selected' : ''}>${v.label}</option>`).join('')}</select></div>`).join('');
+}
+$('#nbots').oninput = buildBotSelectors; buildBotSelectors();
+$('#btnNew').onclick = () => $('#setup').showModal();
+$('#btnValues').onclick = () => { showVals = !showVals; $('#optvals').checked = showVals; render(); };
+$('#btnStart').onclick = () => {
+  $('#setup').close(); showVals = $('#optvals').checked;
+  const kinds = [...document.querySelectorAll('#botsel select')].map(s => s.value);
+  startGame(kinds);
+};
+$('#btnAgain').onclick = () => { $('#endd').close(); $('#setup').showModal(); };
+
+/* ---------- drawing ---------- */
+const PIPS = { 1: [4], 2: [0, 8], 3: [0, 4, 8], 4: [0, 2, 6, 8], 5: [0, 2, 4, 6, 8], 6: [0, 2, 3, 5, 6, 8] };
+const die = (n, cls = '', anim = false) => `<div class="die ${cls} ${anim ? 'rolling' : ''}">${Array.from({ length: 9 }, (_, i) => `<i class="${PIPS[n].includes(i) ? 'p' : ''}"></i>`).join('')}</div>`;
+const fmt = d => (d === 0 ? '★' : (d < 0 ? '−' : '+') + Math.abs(d).toFixed(1));
+function badge(vals, v) {            // vals: {best}
+  if (!vals) return '';
+  const d = v - vals.best, cls = d > -0.001 ? 's' : d > -1 ? 'g' : d > -3 ? 'a' : 'r';
+  return `<span class="val ${cls}" title="expected final score ≈ ${v.toFixed(1)}">${fmt(Math.abs(d) < 0.05 ? 0 : d)}</span>`;
+}
+function lookupVals() {              // value labels for the current pending decision
+  if (!pending || !showVals || !tableOK) return null;
+  const ov = pending.ov, all = [ov.skip, ...ov.cells.map(c => c.v)];
+  return { best: Math.max(...all), ov };
+}
+function renderMe() {
+  const me = G.players[0], vals = lookupVals(), legal = pending ? pending.options : [];
+  let html = '';
+  for (let i = 0; i < 4; i++) {
+    const d = Q.DIR[i], st = me.rows[i], marks = me.marks[i], last = Q.RP[st];
+    const cells = Array.from({ length: 11 }, (_, x) => ({ pos: x + 1, n: Q.numAt(d, x + 1) }));
+    const row = cells.map(({ pos, n: n2 }) => {
+      const isM = marks.includes(pos), dead = !isM && pos <= last;
+      const lg = legal.find(o => o.row === i && o.n === n2);
+      let cls = 'cell' + (isM ? ' marked' : '') + (dead ? ' dead' : '') + (lg ? ' legal' : '');
+      let b = '';
+      if (lg && vals) { const v = pending.ov.cells.find(c => c.row === i && c.n === n2).v; b = badge(vals, v); if (Math.abs(v - vals.best) < 0.05) cls += ' best'; }
+      return `<button class="${cls}" data-row="${i}" data-n="${n2}" ${lg ? '' : 'tabindex="-1"'}>${n2}${b}</button>`;
+    }).join('');
+    const lockCell = `<button class="cell lock ${Q.RL[st] ? 'marked lockcell' : ''}" tabindex="-1">🔒</button>`;
+    const c = Q.RC[st];
+    html += `<div class="rowwrap ${Q.COLORS[i]} ${G.closed[i] ? 'closed' : ''}"><div class="cells">${row}${lockCell}</div>
+      <div class="rowinfo"><span>${c} mark${c === 1 ? '' : 's'}</span><span>${Q.T(c)} pts</span></div></div>`;
+  }
+  const pen = Array.from({ length: 4 }, (_, k) => `<i class="${k < me.k ? 'x' : ''}"></i>`).join('');
+  html += `<div class="meinfo"><div>Penalties <span class="pen">${pen}</span></div><div class="total">${Q.scoreOf(G, 0)} <small>pts</small></div></div>`;
+  $('#me').innerHTML = html;
+}
+function renderOpps() {
+  $('#opps').innerHTML = G.players.slice(1).map((pl, j) => {
+    const p = j + 1;
+    const mini = [0, 1, 2, 3].map(i => `<div class="mini ${G.closed[i] ? 'closed' : ''}">${Array.from({ length: 11 }, (_, x) =>
+      `<i class="${pl.marks[i].includes(x + 1) ? 'm ' + Q.COLORS[i] : ''}"></i>`).join('')}</div>`).join('');
+    const pen = Array.from({ length: 4 }, (_, k) => `<i class="${k < pl.k ? 'x' : ''}"></i>`).join('');
+    return `<div class="card opp ${G.active === p && G.phase !== 'idle' ? 'active' : ''}"><div class="top"><b>${pl.name}</b><span class="kind">${Q.BOT_KINDS[pl.kind].label}</span></div>${mini}
+      <div class="foot"><span class="pen">${pen}</span><b style="color:var(--text)">${Q.scoreOf(G, p)}</b></div></div>`;
+  }).join('');
+}
+function renderDice(anim) {
+  if (!G.dice) { $('#dice').innerHTML = ''; return; }
+  const d = G.dice;
+  $('#dice').innerHTML = die(d.w[0], '', anim) + die(d.w[1], '', anim) + '<div class="sep"></div>' +
+    d.c.map((v, i) => die(v, Q.COLORS[i] + (G.closed[i] ? ' off' : ''), anim)).join('');
+}
+function setStatus(main, sub = '') { $('#status').innerHTML = main + (sub ? `<small>${sub}</small>` : ''); }
+function setActions(list) {
+  $('#actions').innerHTML = '';
+  list.forEach(a => { const b = document.createElement('button'); b.className = 'btn' + (a.primary ? ' primary' : ''); b.innerHTML = a.html; b.onclick = a.fn; $('#actions').appendChild(b); });
+}
+function logAdd(s) { G.log.unshift(s); G.log = G.log.slice(0, 7); $('#log').innerHTML = G.log.map(x => `<div>${x}</div>`).join(''); }
+function render(anim) { if (!G) return; renderOpps(); renderMe(); renderDice(anim); }
+
+/* ---------- decisions ---------- */
+$('#me').addEventListener('click', e => {
+  const b = e.target.closest('.cell.legal'); if (!b || !pending) return;
+  const row = +b.dataset.row, n = +b.dataset.n, p = pending; pending = null; p.resolve({ row, n });
+});
+function ask(stage, options, prompt, sub) {
+  return new Promise(resolve => {
+    const ov = tableOK ? Q.optionValues(G, 0, stage) : null;
+    pending = { stage, options, resolve, ov };
+    const active = G.active === 0, pen = stage === 'colour' && G.players[0].turnMarks === 0;
+    const vals = lookupVals();
+    const skipLabel = 'Skip' + (pen ? ' (−5 penalty)' : '') + (vals ? ' ' + badge(vals, ov.skip).replace('class="val', 'style="position:static;margin-left:6px" class="val') : '');
+    setStatus(prompt, vals ? sub + ` · best ≈ ${vals.best.toFixed(1)} pts final` : sub);
+    setActions([{ html: skipLabel, fn: () => { const p = pending; pending = null; p.resolve(null); } }]);
+    render();
+  });
+}
+const label = (i, n) => `<b style="color:var(--${Q.COLORS[i]})">${Q.COLORS[i]} ${n}</b>`;
+
+/* ---------- game loop ---------- */
+function startGame(kinds) {
+  if ($('#setup').open) $('#setup').close();
+  const specs = [{ name: 'You', kind: 'human' }, ...kinds.map((k, i) => ({ name: NAMES[i], kind: k }))];
+  G = Q.newGame(specs); G.turn = Math.floor(G.rng() * specs.length);
+  pending = null; const id = ++gameId; render(); setActions([]);
+  $('#log').innerHTML = ''; G.log = [];
+  loop(id);
+}
+async function loop(id) {
+  while (!G.over && id === gameId) {
+    const act = G.turn % G.players.length, actor = G.players[act];
+    if (act === 0) { setStatus('Your turn', 'Roll the dice'); setActions([{ html: '🎲 Roll', primary: true, fn: () => { window.__roll && window.__roll(); } }]); G.dice = null; render(); await new Promise(r => { window.__roll = r; }); setActions([]); }
+    else { setStatus(`${actor.name}'s turn`); await sleep(500); }
+    if (id !== gameId) return;
+    Q.rollDice(G); render(true); await sleep(act === 0 ? 350 : 700);
+    const ws = Q.whiteSum(G);
+    /* white phase: bots, then you */
+    Q.botsWhite(G).forEach(m => logAdd(`${G.players[m.p].name} → ${label(m.row, m.n)}${m.lock ? ' 🔒' : ''}`));
+    render();
+    const wopts = Q.whiteOptions(G, 0);
+    if (wopts.length) {
+      const ch = await ask('white', wopts, `White dice = <b>${ws}</b>`, act === 0 ? 'Mark the white sum in any row — or skip (colour dice come next)' : 'Mark the white sum in any row — or skip');
+      if (id !== gameId) return; pending = null;
+      if (ch) { const m = Q.doMark(G, 0, ch.row, ch.n); logAdd(`You → ${label(m.row, m.n)}${m.lock ? ' 🔒' : ''}`); }
+    } else { setStatus(`White dice = <b>${ws}</b>`, 'No legal white mark for you'); setActions([]); await sleep(act === 0 ? 700 : 450); }
+    render();
+    /* colour phase (active player only) */
+    if (act === 0) {
+      const copts = Q.colourOptions(G, 0);
+      if (copts.length) {
+        const ch = await ask('colour', copts, 'Colour dice', 'Pick one white die + one colour die: mark that number in the colour\'s row — or skip');
+        if (id !== gameId) return; pending = null;
+        if (ch) { const m = Q.doMark(G, 0, ch.row, ch.n); logAdd(`You → ${label(m.row, m.n)}${m.lock ? ' 🔒' : ''}`); }
+      } else { setStatus('Colour dice', 'No legal colour mark'); setActions([]); await sleep(700); }
+    } else {
+      Q.botColour(G).forEach(m => logAdd(`${G.players[m.p].name} → ${label(m.row, m.n)}${m.lock ? ' 🔒' : ''}`));
+    }
+    setActions([]); render();
+    const ev = Q.finishTurn(G);
+    if (ev.penalty) logAdd(`${actor.name} had no mark: <b style="color:var(--bad)">−5 penalty</b>`);
+    ev.closedNow.forEach(i => logAdd(`${label(i, '')} row is now closed`));
+    render(); await sleep(350);
+  }
+  if (id === gameId && G.over) finish();
+}
+function finish() {
+  const sc = G.players.map((p, i) => ({ i, name: p.name, s: Q.scoreOf(G, i) })).sort((a, b) => b.s - a.s);
+  const top = sc[0].s, winners = sc.filter(x => x.s === top);
+  $('#endt').textContent = winners.some(w => w.i === 0) ? (winners.length > 1 ? 'You tied for the win!' : 'You win! 🎉') : `${winners[0].name} wins`;
+  $('#ranks').innerHTML = sc.map(x => `<div class="rank ${x.i === 0 ? 'me' : ''}"><span>${x.name}</span><b>${x.s}</b></div>`).join('');
+  setStatus('Game over'); setActions([]);
+  $('#endd').showModal();
+}
+
+/* test hook */
+window.__game = () => G; window.__startTest = (kinds) => startGame(kinds);
+$('#setup').showModal();
+</script>
+</body>
+</html>

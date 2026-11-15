@@ -1,0 +1,327 @@
+/* Qwixx engine: rules, bots, DP-table value function with row-closure threat correction.
+ * Works in the browser (window.Qwixx) and in node (require). */
+(function (root, factory) {
+  if (typeof module === 'object' && module.exports) module.exports = factory();
+  else root.Qwixx = factory();
+})(typeof self !== 'undefined' ? self : this, function () {
+  'use strict';
+
+  const NRS = 62, NR = 4;
+  const DIR = [1, 1, -1, -1];                    // +1: 2→12 (red, yellow), -1: 12→2 (green, blue)
+  const COLORS = ['red', 'yellow', 'green', 'blue'];
+
+  /* ---------- row states: (p = last marked position 0..11, c = marks incl. lock bonus, locked) ---------- */
+  const RP = new Int8Array(NRS), RC = new Int8Array(NRS), RL = new Int8Array(NRS);
+  (function () {
+    let id = 0; RP[id] = 0; RC[id] = 0; RL[id] = 0; id++;
+    for (let p = 1; p <= 10; p++) for (let c = 1; c <= p; c++) { RP[id] = p; RC[id] = c; RL[id] = 0; id++; }
+    for (let c = 7; c <= 12; c++) { RP[id] = 11; RC[id] = c; RL[id] = 1; id++; }
+  })();
+  const posOf = (d, n) => (d > 0 ? n - 1 : 13 - n);
+  const numAt = (d, pos) => (d > 0 ? pos + 1 : 13 - pos);
+  const TRt = [new Int8Array(NRS * 14).fill(-1), new Int8Array(NRS * 14).fill(-1)];
+  (function () {
+    for (let di = 0; di < 2; di++) {
+      const d = di === 0 ? 1 : -1;
+      for (let r = 0; r < NRS; r++) for (let n = 2; n <= 12; n++) {
+        if (RL[r]) continue;
+        const q = posOf(d, n);
+        if (q <= RP[r]) continue;
+        let np, nc, nl;
+        if (q === 11) { if (RC[r] < 5) continue; np = 11; nc = RC[r] + 2; nl = 1; }
+        else { np = q; nc = RC[r] + 1; nl = 0; }
+        for (let s = 0; s < NRS; s++) if (RP[s] === np && RC[s] === nc && RL[s] === nl) { TRt[di][r * 14 + n] = s; break; }
+      }
+    }
+  })();
+  /* new row state after marking number n in row i (or -1) */
+  const tr = (i, st, n) => (n < 2 || n > 12 ? -1 : TRt[DIR[i] > 0 ? 0 : 1][st * 14 + n]);
+
+  const T = c => (c * (c + 1)) / 2;
+  const nLocks = rows => RL[rows[0]] + RL[rows[1]] + RL[rows[2]] + RL[rows[3]];
+  const isTerminal = (rows, k) => k >= 4 || nLocks(rows) >= 2;
+  const rowsScore = (rows, k) => T(RC[rows[0]]) + T(RC[rows[1]]) + T(RC[rows[2]]) + T(RC[rows[3]]) - 5 * k;
+
+  const PRB = n => (6 - Math.abs(n - 7)) / 36;
+  function skipCost(i, st, n) {                    // probability mass of the cells jumped over
+    const q = posOf(DIR[i], n); let c = 0;
+    for (let x = RP[st] + 1; x < q; x++) c += PRB(numAt(DIR[i], x));
+    return c;
+  }
+
+  /* ---------- value table (stationary DP, loaded from disk/network) ---------- */
+  const Tbl = { ready: false, H: 0.035, ACT: 0.2, min: 0, scale: 0, np2: 0, tb: null };
+  function setTable(metaText, bufs) {
+    const m = metaText.trim().split(/\s+/).map(Number);
+    Tbl.min = m[0]; Tbl.scale = m[1]; Tbl.H = m[2]; Tbl.ACT = 1 / m[3]; Tbl.np2 = m[4];
+    Tbl.tb = bufs.map(b => new Uint16Array(b.buffer ? b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) : b));
+    Tbl.ready = true;
+    solveAllSingle();
+  }
+  async function loadTable(base, onProgress) {
+    const meta = await (await fetch(base + 'meta.txt')).text();
+    const bufs = [];
+    for (let k = 0; k < 4; k++) {
+      let r = await fetch(base + 'table_k' + k + '.bin');
+      if (r.ok) bufs.push(await r.arrayBuffer());
+      else {                                         // hosted copy: base64 inside JSON
+        r = await fetch(base + 'table_k' + k + '.json');
+        if (!r.ok) throw new Error('table_k' + k + ' not found');
+        const bin = atob((await r.json()).b64), u = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+        bufs.push(u.buffer);
+      }
+      if (onProgress) onProgress((k + 1) / 4);
+    }
+    setTable(meta, bufs);
+  }
+  function loadTableFromDir(dir) {
+    const fs = require('fs');
+    setTable(fs.readFileSync(dir + '/meta.txt', 'utf8'), [0, 1, 2, 3].map(k => fs.readFileSync(dir + '/table_k' + k + '.bin')));
+  }
+  function vtab(r, k) {
+    let a = r[0], b = r[1], c = r[2], d = r[3], t;
+    if (a > b) { t = a; a = b; b = t; }
+    if (c > d) { t = c; c = d; d = t; }
+    return Tbl.min + Tbl.scale * Tbl.tb[k][(b * (b + 1) / 2 + a) * Tbl.np2 + (d * (d + 1) / 2 + c)];
+  }
+
+  /* ---------- single-row DP with closure hazard (threat correction) ---------- */
+  const LG = [0, .01, .02, .035, .05, .075, .1, .15, .2, .3, .45, .6, 1.0];
+  const NG = LG.length;
+  const F = LG.map(() => new Float64Array(NRS));
+  function solveSingle(g) {
+    const H = Tbl.H, ACT = Tbl.ACT, lam = LG[g], rho = 1 - (1 - H) * (1 - lam), Fg = F[g];
+    for (let s = 0; s < NRS; s++) if (RL[s]) Fg[s] = T(RC[s]);
+    const VAL = s2 => rho * T(RC[s2]) + (1 - rho) * Fg[s2];
+    for (let p = 10; p >= 0; p--) for (let s = 0; s < NRS; s++) {
+      if (RL[s] || RP[s] !== p) continue;
+      const Ts = T(RC[s]), mpas = [], ppas = [], mact = [], pact = [];
+      for (let w1 = 1; w1 <= 6; w1++) for (let w2 = w1; w2 <= 6; w2++) {
+        const pw = (w1 === w2 ? 1 : 2) / 36;
+        const s1 = tr(0, s, w1 + w2), mw = s1 >= 0 ? VAL(s1) : -1e18;
+        mpas.push(mw); ppas.push(pw);
+        for (let cd = 1; cd <= 6; cd++) {
+          let best = mw;
+          for (let j = 0; j < 2; j++) {
+            const w = j ? w2 : w1; if (j && w2 === w1) break;
+            const a = tr(0, s, w + cd); if (a >= 0 && VAL(a) > best) best = VAL(a);
+            if (s1 >= 0) { const b = tr(0, s1, w + cd); if (b >= 0 && VAL(b) > best) best = VAL(b); }
+          }
+          mact.push(best); pact.push(pw / 6);
+        }
+      }
+      let x = Ts;
+      for (let it = 0; it < 2000; it++) {
+        const Sx = rho * Ts + (1 - rho) * x; let a = 0, b = 0;
+        for (let q = 0; q < mact.length; q++) a += pact[q] * (mact[q] > Sx ? mact[q] : Sx);
+        for (let q = 0; q < mpas.length; q++) b += ppas[q] * (mpas[q] > Sx ? mpas[q] : Sx);
+        const xn = ACT * a + (1 - ACT) * b;
+        if (Math.abs(xn - x) < 1e-9) { x = xn; break; }
+        x = xn;
+      }
+      Fg[s] = x;
+    }
+  }
+  function solveAllSingle() { for (let g = 0; g < NG; g++) solveSingle(g); }
+  function Fint(lam, s) {
+    if (RL[s]) return T(RC[s]);
+    let g = 0; while (g < NG - 2 && lam > LG[g + 1]) g++;
+    let t = (lam - LG[g]) / (LG[g + 1] - LG[g]); t = t < 0 ? 0 : t > 1 ? 1 : t;
+    return F[g][s] * (1 - t) + F[g + 1][s] * t;
+  }
+
+  const KAPPA = 1.0;                               // strength of the threat correction (tuned in simulation)
+  const PL = 0.034;                                // chance per turn that one qualified opponent locks a row
+  /* expected final score after a move: table value with end hazard + closure correction */
+  function stateValue(rows, k, lam, kappa) {
+    if (isTerminal(rows, k)) return rowsScore(rows, k);
+    const sc = rowsScore(rows, k);
+    let v = (1 - Tbl.H) * vtab(rows, k) + Tbl.H * sc;
+    kappa = kappa === undefined ? KAPPA : kappa;
+    if (kappa && lam) for (let i = 0; i < NR; i++) if (lam[i] > 0) v += kappa * (Fint(lam[i], rows[i]) - F[0][rows[i]]);
+    return v;
+  }
+  /* closure risk per row from everybody else's boards: lock needs >=5 marks and the last cell still open */
+  function threats(G, me) {
+    const lam = [0, 0, 0, 0];
+    for (let i = 0; i < NR; i++) {
+      if (G.closed[i]) { lam[i] = 1; continue; }
+      let prod = 1;
+      G.players.forEach((pl, p) => {
+        if (p === me) return;
+        const st = pl.rows[i], c = RC[st];
+        const reach = c >= 5 ? 1 : c === 4 ? .55 : c === 3 ? .25 : c === 2 ? .1 : .03;
+        const cost = skipCost(i, st, DIR[i] > 0 ? 12 : 2);
+        prod *= 1 - PL * reach * Math.exp(-cost / 0.12);
+      });
+      lam[i] = Math.min(0.6, 1 - prod);
+    }
+    return lam;
+  }
+
+  /* ---------- option enumeration for one player's turn ---------- */
+  function applyRow(rows, i, st) { const r = rows.slice(); r[i] = st; return r; }
+  /* all (white mark, colour mark) combinations; each option: {w, c, rows, nm, cw, cc} */
+  function enumOptions(rows, closed, w1, w2, cdice, active) {
+    const S = w1 + w2, out = [];
+    const wl = [{ i: -1, st: -1 }];
+    for (let i = 0; i < NR; i++) if (!closed[i]) { const st = tr(i, rows[i], S); if (st >= 0) wl.push({ i, st }); }
+    for (const wc of wl) {
+      const r1 = wc.i >= 0 ? applyRow(rows, wc.i, wc.st) : rows;
+      const cw = wc.i >= 0 ? skipCost(wc.i, rows[wc.i], S) : 0;
+      out.push({ w: wc.i >= 0 ? { row: wc.i, n: S } : null, c: null, rows: r1, nm: wc.i >= 0 ? 1 : 0, cw, cc: 0 });
+      if (!active || nLocks(r1) >= 2) continue;
+      for (let i = 0; i < NR; i++) {
+        if (closed[i]) continue;
+        for (let j = 0; j < 2; j++) {
+          if (j && w1 === w2) break;
+          const n = (j ? w2 : w1) + cdice[i], st = tr(i, r1[i], n);
+          if (st < 0) continue;
+          out.push({ w: wc.i >= 0 ? { row: wc.i, n: S } : null, c: { row: i, n }, rows: applyRow(r1, i, st),
+                     nm: (wc.i >= 0 ? 1 : 0) + 1, cw, cc: skipCost(i, r1[i], n) });
+        }
+      }
+    }
+    return out;
+  }
+
+  /* heuristic bot: only accepts marks that skip little probability mass */
+  function heurPlan(rows, active, w1, w2, cdice, closed, th, pm) {
+    const opts = enumOptions(rows, closed, w1, w2, cdice, active);
+    let best = null, bestN = 0, bestTot = Infinity, cheap = null, cheapV = Infinity;
+    for (const o of opts) {
+      if (o.nm === 0) continue;
+      const tot = o.cw + o.cc;
+      const ok = (o.w === null || o.cw <= th) && (o.c === null || o.cc <= th);
+      if (ok && (o.nm > bestN || (o.nm === bestN && tot < bestTot))) { best = o; bestN = o.nm; bestTot = tot; }
+      if (o.nm === 1 && tot < cheapV) { cheap = o; cheapV = tot; }
+    }
+    if (best) return best;
+    if (active && cheap && cheapV <= pm) return cheap;
+    return opts[0];                                // no mark (penalty if active)
+  }
+  /* expert bot: maximise the DP value of the resulting state */
+  function expertPlan(G, me, active, w1, w2, cdice) {
+    const pl = G.players[me], lam = threats(G, me);
+    const opts = enumOptions(pl.rows, G.closed, w1, w2, cdice, active);
+    let best = null, bv = -Infinity;
+    for (const o of opts) {
+      const v = stateValue(o.rows, pl.k + (active && o.nm === 0 ? 1 : 0), lam);
+      o.value = v;
+      if (v > bv + 1e-9) { bv = v; best = o; }
+    }
+    return best;
+  }
+
+  /* ---------- game ---------- */
+  const BOT_KINDS = {
+    patient:  { label: 'Patient',  th: 0,   pm: 0 },
+    careful:  { label: 'Careful',  th: .04, pm: .12 },
+    balanced: { label: 'Balanced', th: .09, pm: .25 },
+    greedy:   { label: 'Greedy',   th: 1,   pm: 1 },
+    expert:   { label: 'Expert',   expert: true },
+  };
+  function mulberry32(a) { return function () { a |= 0; a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+
+  /* specs: [{name, kind:'human'|botKind}] */
+  function newGame(specs, seed) {
+    const rng = mulberry32(seed === undefined ? (Math.random() * 2 ** 31) | 0 : seed);
+    return {
+      rng,
+      players: specs.map(s => ({ name: s.name, kind: s.kind, rows: [0, 0, 0, 0], marks: [[], [], [], []], k: 0, turnMarks: 0 })),
+      closed: [false, false, false, false], turn: 0, over: false, dice: null, plans: [], phase: 'idle', log: [],
+    };
+  }
+  const die = G => 1 + Math.floor(G.rng() * 6);
+  function rollDice(G) {
+    G.active = G.turn % G.players.length;
+    G.dice = { w: [die(G), die(G)], c: [die(G), die(G), die(G), die(G)] };
+    G.players.forEach(p => { p.turnMarks = 0; });
+    G.plans = G.players.map((pl, p) => {
+      if (pl.kind === 'human') return null;
+      const act = p === G.active, d = G.dice;
+      if (BOT_KINDS[pl.kind].expert && Tbl.ready) return expertPlan(G, p, act, d.w[0], d.w[1], d.c);
+      const kd = BOT_KINDS[pl.kind].expert ? BOT_KINDS.balanced : BOT_KINDS[pl.kind];
+      return heurPlan(pl.rows, act, d.w[0], d.w[1], d.c, G.closed, kd.th, kd.pm);
+    });
+    G.phase = 'white';
+    return G.dice;
+  }
+  function doMark(G, p, row, n) {
+    const pl = G.players[p], st = tr(row, pl.rows[row], n);
+    if (st < 0 || G.closed[row]) throw new Error('illegal mark');
+    pl.rows[row] = st; pl.marks[row].push(posOf(DIR[row], n)); pl.turnMarks++;
+    return { row, n, lock: !!RL[st] };
+  }
+  const whiteSum = G => G.dice.w[0] + G.dice.w[1];
+  function whiteOptions(G, p) {
+    const pl = G.players[p], S = whiteSum(G), out = [];
+    for (let i = 0; i < NR; i++) if (!G.closed[i] && tr(i, pl.rows[i], S) >= 0) out.push({ row: i, n: S });
+    return out;
+  }
+  function colourOptions(G, p) {
+    const pl = G.players[p], out = [], w = G.dice.w;
+    for (let i = 0; i < NR; i++) {
+      if (G.closed[i]) continue;
+      const seen = new Set();
+      for (const wd of w) { const n = wd + G.dice.c[i]; if (!seen.has(n) && tr(i, pl.rows[i], n) >= 0) { seen.add(n); out.push({ row: i, n }); } }
+    }
+    return out;
+  }
+  /* white phase for all bots (human decides separately via doMark) */
+  function botsWhite(G) {
+    const ev = [];
+    G.players.forEach((pl, p) => { const pn = G.plans[p]; if (pn && pn.w) ev.push({ p, ...doMark(G, p, pn.w.row, pn.w.n) }); });
+    return ev;
+  }
+  function botColour(G) {
+    const p = G.active, pn = G.plans[p];
+    if (pn && pn.c) return [{ p, ...doMark(G, p, pn.c.row, pn.c.n) }];
+    return [];
+  }
+  /* end of turn: penalty, row closures, game end, advance */
+  function finishTurn(G) {
+    const ev = { penalty: false, closedNow: [], over: false };
+    const a = G.players[G.active];
+    if (a.turnMarks === 0) { a.k++; ev.penalty = true; }
+    for (let i = 0; i < NR; i++) if (!G.closed[i] && G.players.some(pl => RL[pl.rows[i]])) { G.closed[i] = true; ev.closedNow.push(i); }
+    if (G.closed.filter(Boolean).length >= 2 || G.players.some(pl => pl.k >= 4)) { G.over = true; ev.over = true; }
+    G.turn++; G.phase = G.over ? 'over' : 'idle';
+    return ev;
+  }
+  const scoreOf = (G, p) => rowsScore(G.players[p].rows, G.players[p].k);
+  const rowScores = (G, p) => G.players[p].rows.map(r => T(RC[r]));
+
+  /* ---------- value labels for the human ---------- */
+  /* stage 'white': value of each white option (incl. best colour follow-up) and of skipping.
+     stage 'colour': value of each colour option given the white mark already made, and of skipping. */
+  function optionValues(G, p, stage) {
+    const pl = G.players[p], d = G.dice, lam = threats(G, p), active = p === G.active;
+    if (stage === 'white') {
+      const opts = enumOptions(pl.rows, G.closed, d.w[0], d.w[1], d.c, active);
+      const byW = new Map(); let skip = -Infinity;
+      for (const o of opts) {
+        const v = stateValue(o.rows, pl.k + (active && o.nm === 0 ? 1 : 0), lam);
+        if (o.w) { const key = o.w.row; byW.set(key, Math.max(byW.has(key) ? byW.get(key) : -Infinity, v)); }
+        else skip = Math.max(skip, v);
+      }
+      return { cells: [...byW].map(([row, v]) => ({ row, n: whiteSum(G), v })), skip };
+    }
+    /* colour stage: current rows already include the white mark */
+    const cells = [];
+    for (const o of colourOptions(G, p)) {
+      const st = tr(o.row, pl.rows[o.row], o.n);
+      cells.push({ row: o.row, n: o.n, v: stateValue(applyRow(pl.rows, o.row, st), pl.k, lam) });
+    }
+    const skip = stateValue(pl.rows, pl.k + (pl.turnMarks === 0 ? 1 : 0), lam);
+    return { cells, skip };
+  }
+
+  return {
+    NR, DIR, COLORS, BOT_KINDS, RP, RC, RL, Tbl, T, posOf, numAt, tr, skipCost, rowsScore, isTerminal,
+    loadTable, loadTableFromDir, setTable, stateValue, threats, enumOptions, heurPlan, expertPlan,
+    newGame, rollDice, doMark, whiteOptions, colourOptions, botsWhite, botColour, finishTurn,
+    scoreOf, rowScores, optionValues, whiteSum, Fint, F, KAPPA,
+  };
+});
