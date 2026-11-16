@@ -381,5 +381,6 @@
     loadTable, loadTableFromDir, setTable, stateValue, threats, enumOptions, heurPlan, expertPlan,
     newGame, rollDice, doMark, whiteOptions, colourOptions, botsWhite, botColour, finishTurn,
     scoreOf, rowScores, optionValues, whiteSum, Fint, F, KAPPA, updateClosed, rollout, mulberry32,
+    simTurn, isOver, markL,
   };
 });
