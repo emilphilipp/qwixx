@@ -124,7 +124,8 @@ input[type=range]{padding:0;width:140px}
 </dialog>
 <dialog id="endd"><h2 id="endt">Game over</h2><div id="ranks"></div><div style="text-align:right;margin-top:12px"><button class="btn" id="btnUndoEnd">↶ Undo last move</button> <button class="btn primary" id="btnAgain">Play again</button></div></dialog>
 
-<script src="qwixx-engine.js"></script>
+<!-- bump ?v= when the engine changes: GitHub Pages lets browsers cache files for 10 min, and an old engine with a new page breaks -->
+<script src="qwixx-engine.js?v=2"></script>
 <script>
 const Q = window.Qwixx, $ = s => document.querySelector(s);
 const sleep = ms => new Promise(r => setTimeout(r, window.__fast ? 0 : ms));
@@ -137,7 +138,7 @@ let snaps = [];                      // game state at the start of each turn (un
 Q.loadTable('table/', f => { $('#tblstat').textContent = 'loading values ' + Math.round(f * 100) + '%'; })
   .then(() => { tableOK = true; $('#tblstat').textContent = 'values ready'; $('#tblstat').classList.add('on'); render(); })
   .catch(e => { $('#tblstat').textContent = 'no value tables'; $('#tblstat').title = String(e); });
-Q.loadRLModel('rl/models/d1.json').catch(e => console.warn('RL model not loaded, RL bots play as Experts', e));
+if (Q.loadRLModel) Q.loadRLModel('rl/models/d1.json?v=1').catch(e => console.warn('RL model not loaded, RL bots play as Experts', e));
 
 /* ---------- setup ---------- */
 function buildBotSelectors() {
