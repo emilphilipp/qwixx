@@ -3,108 +3,20 @@ const Q = require('../qwixx-engine.js');
 const path = require('path');
 Q.loadTableFromDir(path.join(__dirname, '..', 'table'));
 
-const NF = 23;
+const NF = Q.RL_NF;
 const FEATURE_NAMES = [
   'active', 'npl', 'myTurn', 'myEV', 'myScore', 'myK', 'myEligible', 'closedAfter', 'ends',
   'oppEVmax', 'oppEV2', 'oppEVmean', 'oppScoreMax', 'oppScoreMean', 'oppKmax', 'oppEligible', 'lamSum',
   'evLead', 'scoreLead', 'endsSign', 'evGap', 'myPotential', 'oppPotential',
 ];
+/* features, MLP and option scoring live in the engine (shared with the browser) */
+const features = (G, me, ctx, o, bestValue, out, off) => Q.rlFeatures(G, me, me === G.active, ctx, o, bestValue, out, off);
+const loadModel = file => Q.prepareModel(JSON.parse(require('fs').readFileSync(file, 'utf8')));
 
-/* features that do not depend on my option: computed once per decision */
-function context(G, me) {
-  const n = G.players.length, ev = [], sc = [];
-  let kmax = 0;
-  G.players.forEach((pl, p) => {
-    if (p === me) return;
-    ev.push(Q.stateValue(pl.rows, pl.k, Q.threats(G, p)));
-    sc.push(Q.rowsScore(pl.rows, pl.k));
-    if (pl.k > kmax) kmax = pl.k;
-  });
-  ev.sort((a, b) => b - a);
-  let elig = 0;
-  for (let i = 0; i < 4; i++) if (!G.closed[i] && G.players.some((pl, p) => p !== me && Q.RC[pl.rows[i]] >= 5)) elig++;
-  const lam = Q.threats(G, me);
-  return {
-    n, lam, lamSum: lam.reduce((a, b) => a + b, 0), kmax, elig,
-    evMax: ev[0], ev2: ev.length > 1 ? ev[1] : ev[0], evMean: ev.reduce((a, b) => a + b, 0) / ev.length,
-    scMax: Math.max(...sc), scMean: sc.reduce((a, b) => a + b, 0) / sc.length,
-    closed: G.closed.filter(Boolean).length,
-  };
-}
-
-/* options for `me` on the current dice, each with its afterstate value (the Expert's criterion) */
-function options(G, me, ctx) {
-  const pl = G.players[me], active = me === G.active, d = G.dice;
-  const opts = Q.enumOptions(pl.rows, G.closed, d.w[0], d.w[1], d.c, active);
-  for (const o of opts) {
-    o.k = pl.k + (active && o.nm === 0 ? 1 : 0);
-    o.value = Q.stateValue(o.rows, o.k, ctx.lam);
-  }
-  return opts;
-}
-
-function features(G, me, ctx, o, bestValue, out, off) {
-  const pl = G.players[me];
-  let newLocks = 0, myElig = 0;
-  for (let i = 0; i < 4; i++) {
-    if (G.closed[i]) continue;
-    if (Q.RL[o.rows[i]] && !Q.RL[pl.rows[i]]) newLocks++;
-    else if (!Q.RL[o.rows[i]] && Q.RC[o.rows[i]] >= 5) myElig++;
-  }
-  const score = Q.rowsScore(o.rows, o.k), closedAfter = ctx.closed + newLocks;
-  const ends = closedAfter >= 2 || o.k >= 4 ? 1 : 0;
-  const lead = score - ctx.scMax;
-  const f = [
-    me === G.active ? 1 : 0, ctx.n, G.turn / ctx.n, o.value, score, o.k, myElig, closedAfter, ends,
-    ctx.evMax, ctx.ev2, ctx.evMean, ctx.scMax, ctx.scMean, ctx.kmax, ctx.elig, ctx.lamSum,
-    o.value - ctx.evMax, lead, ends * Math.sign(lead), o.value - bestValue, o.value - score, ctx.evMax - ctx.scMax,
-  ];
-  for (let j = 0; j < NF; j++) out[off + j] = f[j];
-}
-
-/* ---------- MLP (weights exported by train.py) ---------- */
-function loadModel(file) {
-  const m = JSON.parse(require('fs').readFileSync(file, 'utf8'));
-  m.layers = m.layers.map(L => ({ W: Float64Array.from(L.W.flat()), b: Float64Array.from(L.b), nin: L.W[0].length, nout: L.W.length }));
-  return m;
-}
-/* returns the logit of P(win) */
-function forward(m, x, off) {
-  let h = new Float64Array(NF);
-  for (let j = 0; j < NF; j++) h[j] = (x[off + j] - m.mean[j]) / m.std[j];
-  for (let l = 0; l < m.layers.length; l++) {
-    const L = m.layers[l], o = new Float64Array(L.nout), last = l === m.layers.length - 1;
-    for (let r = 0; r < L.nout; r++) {
-      let s = L.b[r]; const base = r * L.nin;
-      for (let c = 0; c < L.nin; c++) s += L.W[base + c] * h[c];
-      o[r] = last || s > 0 ? s : 0;
-    }
-    h = o;
-  }
-  return h[0];
-}
-
-/* ---------- policies: (G, me) -> chosen option; may push the chosen afterstate's features to rec ---------- */
-function expertPolicy(G, me) {
-  const ctx = context(G, me), opts = options(G, me, ctx);
-  let best = opts[0];
-  for (const o of opts) if (o.value > best.value + 1e-9) best = o;
-  return { ctx, opts, best };
-}
-function makeRL(model, eps) {
-  const buf = new Float64Array(NF);
-  return function (G, me) {
-    const { ctx, opts, best } = expertPolicy(G, me);
-    if (!model) return { ctx, opts, best, chosen: best };
-    let chosen = null, bl = -Infinity;
-    for (const o of opts) {
-      features(G, me, ctx, o, best.value, buf, 0);
-      o.logit = forward(model, buf, 0);
-      if (o.logit > bl) { bl = o.logit; chosen = o; }
-    }
-    return { ctx, opts, best, chosen };
-  };
-}
+/* ---------- policies: (G, me) -> {ctx, opts, best (Expert), chosen} ---------- */
+const decide = (G, me, model) => Q.rlDecide(G, me, me === G.active, G.dice.w[0], G.dice.w[1], G.dice.c, model);
+const expertPolicy = (G, me) => decide(G, me, null);
+const makeRL = model => (G, me) => decide(G, me, model);
 
 /* play one game. specs: [{kind}] with kind in BOT_KINDS or 'policy:<name>'; policies: {name: fn}.
    rec (optional): {seat, eps, rng, rows: []} records features of the seat's chosen afterstates. */
@@ -177,4 +89,4 @@ function makeRollout(M, prune, margin = 0) {
 }
 
 const POOL = ['patient', 'careful', 'balanced', 'greedy', 'expert'];
-module.exports = { Q, NF, FEATURE_NAMES, context, options, features, loadModel, forward, expertPolicy, makeRL, playGame, POOL, optionRollout, rolloutValues, makeRollout };
+module.exports = { Q, NF, FEATURE_NAMES, features, loadModel, expertPolicy, makeRL, playGame, POOL, optionRollout, rolloutValues, makeRollout };

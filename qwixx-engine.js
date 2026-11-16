@@ -214,6 +214,88 @@
     return best;
   }
 
+  /* ---------- RL bot: MLP estimate of P(win | afterstate), distilled from rollout labels (see rl/) ---------- */
+  const RL_NF = 23;
+  let RLM = null;                                  // default model for the 'rl' bot kind
+  function prepareModel(m) {
+    return { mean: m.mean, std: m.std, layers: m.layers.map(L => ({ W: Float64Array.from(L.W.flat()), b: Float64Array.from(L.b), nin: L.W[0].length, nout: L.W.length })) };
+  }
+  function setRLModel(json) { RLM = prepareModel(json); }
+  async function loadRLModel(url) { setRLModel(await (await fetch(url)).json()); }
+  /* features that do not depend on my option: computed once per decision */
+  function rlContext(G, me) {
+    const ev = [], sc = [];
+    let kmax = 0, elig = 0;
+    G.players.forEach((pl, p) => {
+      if (p === me) return;
+      ev.push(stateValue(pl.rows, pl.k, threats(G, p)));
+      sc.push(rowsScore(pl.rows, pl.k));
+      if (pl.k > kmax) kmax = pl.k;
+    });
+    ev.sort((a, b) => b - a);
+    for (let i = 0; i < NR; i++) if (!G.closed[i] && G.players.some((pl, p) => p !== me && RC[pl.rows[i]] >= 5)) elig++;
+    const lam = threats(G, me);
+    return {
+      n: G.players.length, lam, lamSum: lam[0] + lam[1] + lam[2] + lam[3], kmax, elig,
+      evMax: ev[0], ev2: ev.length > 1 ? ev[1] : ev[0], evMean: ev.reduce((a, b) => a + b, 0) / ev.length,
+      scMax: Math.max(...sc), scMean: sc.reduce((a, b) => a + b, 0) / sc.length,
+      closed: G.closed.filter(Boolean).length,
+    };
+  }
+  function rlFeatures(G, me, active, ctx, o, bestValue, out, off) {
+    const pl = G.players[me];
+    let newLocks = 0, myElig = 0;
+    for (let i = 0; i < NR; i++) {
+      if (G.closed[i]) continue;
+      if (RL[o.rows[i]] && !RL[pl.rows[i]]) newLocks++;
+      else if (!RL[o.rows[i]] && RC[o.rows[i]] >= 5) myElig++;
+    }
+    const score = rowsScore(o.rows, o.k), closedAfter = ctx.closed + newLocks;
+    const ends = closedAfter >= 2 || o.k >= 4 ? 1 : 0, lead = score - ctx.scMax;
+    const f = [
+      active ? 1 : 0, ctx.n, (G.turn || 0) / ctx.n, o.value, score, o.k, myElig, closedAfter, ends,
+      ctx.evMax, ctx.ev2, ctx.evMean, ctx.scMax, ctx.scMean, ctx.kmax, ctx.elig, ctx.lamSum,
+      o.value - ctx.evMax, lead, ends * Math.sign(lead), o.value - bestValue, o.value - score, ctx.evMax - ctx.scMax,
+    ];
+    for (let j = 0; j < RL_NF; j++) out[off + j] = f[j];
+  }
+  /* logit of P(win) */
+  function rlForward(m, x, off) {
+    let h = new Float64Array(RL_NF);
+    for (let j = 0; j < RL_NF; j++) h[j] = (x[off + j] - m.mean[j]) / m.std[j];
+    for (let l = 0; l < m.layers.length; l++) {
+      const L = m.layers[l], o = new Float64Array(L.nout), last = l === m.layers.length - 1;
+      for (let r = 0; r < L.nout; r++) {
+        let s = L.b[r]; const base = r * L.nin;
+        for (let c = 0; c < L.nin; c++) s += L.W[base + c] * h[c];
+        o[r] = last || s > 0 ? s : 0;
+      }
+      h = o;
+    }
+    return h[0];
+  }
+  /* all options with their Expert value; `best` = the Expert's choice, `chosen` = the model's (Expert if no model) */
+  function rlDecide(G, me, active, w1, w2, cdice, model) {
+    const pl = G.players[me], ctx = rlContext(G, me);
+    const opts = enumOptions(pl.rows, G.closed, w1, w2, cdice, active);
+    let best = opts[0];
+    for (const o of opts) {
+      o.k = pl.k + (active && o.nm === 0 ? 1 : 0);
+      o.value = stateValue(o.rows, o.k, ctx.lam);
+      if (o.value > best.value + 1e-9) best = o;
+    }
+    if (!model) return { ctx, opts, best, chosen: best };
+    const x = new Float64Array(RL_NF);
+    let chosen = best, bl = -Infinity;
+    for (const o of opts) {
+      rlFeatures(G, me, active, ctx, o, best.value, x, 0);
+      o.logit = rlForward(model, x, 0);
+      if (o.logit > bl) { bl = o.logit; chosen = o; }
+    }
+    return { ctx, opts, best, chosen };
+  }
+  const rlPlan = (G, me, active, w1, w2, cdice) => rlDecide(G, me, active, w1, w2, cdice, RLM).chosen;
+
   /* ---------- game ---------- */
   const BOT_KINDS = {
     patient:  { label: 'Patient',  th: 0,   pm: 0 },
@@ -221,8 +303,13 @@
     balanced: { label: 'Balanced', th: .09, pm: .25 },
     greedy:   { label: 'Greedy',   th: 1,   pm: 1 },
     expert:   { label: 'Expert',   expert: true },
+    rl:       { label: 'RL bot',   expert: true, rl: true },   // falls back to the Expert until the model is loaded
   };
-  function mulberry32(a) { return function () { a |= 0; a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+  function mulberry32(a) {
+    const f = function () { a |= 0; a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+    f.getState = () => a; f.setState = v => { a = v; };   // lets the UI snapshot and replay a game (undo)
+    return f;
+  }
 
   /* specs: [{name, kind:'human'|botKind}] */
   function newGame(specs, seed) {
@@ -241,6 +328,7 @@
     G.plans = G.players.map((pl, p) => {
       if (pl.kind === 'human') return null;
       const act = p === G.active, d = G.dice;
+      if (BOT_KINDS[pl.kind].rl && RLM && Tbl.ready) return rlPlan(G, p, act, d.w[0], d.w[1], d.c);
       if (BOT_KINDS[pl.kind].expert && Tbl.ready) return expertPlan(G, p, act, d.w[0], d.w[1], d.c);
       const kd = BOT_KINDS[pl.kind].expert ? BOT_KINDS.balanced : BOT_KINDS[pl.kind];
       return heurPlan(pl.rows, act, d.w[0], d.w[1], d.c, G.closed, kd.th, kd.pm);
@@ -325,9 +413,11 @@
   }
 
   /* ---------- win probability by simulating the rest of the game ----------
-     Everyone plays their real policy (bots: their kind; the human seat: the Expert policy). */
+     Everyone plays their real policy (bots: their kind; the human seat: the Expert policy).
+     RL bots play their network (about 17x slower than the Expert, so the UI shows labels progressively). */
   function planFor(S, p, active, w1, w2, c) {
     const pl = S.players[p], kd = BOT_KINDS[pl.kind];
+    if (kd && kd.rl && RLM) return rlPlan(S, p, active, w1, w2, c);
     if (pl.kind === 'human' || (kd && kd.expert)) return expertPlan(S, p, active, w1, w2, c);
     return heurPlan(pl.rows, active, w1, w2, c, S.closed, kd.th, kd.pm);
   }
@@ -371,7 +461,7 @@
     if (S.players[a].tm === 0) S.players[a].k++;
     updateClosed(S);
     let t = G.turn + 1, guard = 0;
-    while (!isOver(S) && guard++ < 400) { simTurn(S, t % S.players.length, rng); t++; }
+    while (!isOver(S) && guard++ < 400) { S.turn = t; simTurn(S, t % S.players.length, rng); t++; }
     const sc = S.players.map(pl => rowsScore(pl.rows, pl.k)), mx = Math.max(...sc);
     return sc[me] < mx ? 0 : 1 / sc.filter(x => x === mx).length;
   }
@@ -381,6 +471,6 @@
     loadTable, loadTableFromDir, setTable, stateValue, threats, enumOptions, heurPlan, expertPlan,
     newGame, rollDice, doMark, whiteOptions, colourOptions, botsWhite, botColour, finishTurn,
     scoreOf, rowScores, optionValues, whiteSum, Fint, F, KAPPA, updateClosed, rollout, mulberry32,
-    simTurn, isOver, markL,
+    simTurn, isOver, markL, RL_NF, prepareModel, setRLModel, loadRLModel, rlContext, rlFeatures, rlForward, rlDecide, rlPlan,
   };
 });

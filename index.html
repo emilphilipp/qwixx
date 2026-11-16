@@ -22,6 +22,7 @@ h1 span{color:var(--red)} h1 span+span{color:var(--yellow)} h1 span+span+span{co
 .btn:hover{border-color:#42537c}
 .btn.primary{background:#2f5bd6;border-color:#3d6cf0;font-weight:600}
 .btn.primary:hover{background:#3a69ee}
+.btn:disabled{opacity:.4;cursor:default}.btn:disabled:hover{border-color:var(--line)}
 .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:10px}
 
 /* opponents */
@@ -98,6 +99,7 @@ input[type=range]{padding:0;width:140px}
   <header>
     <h1><span>Q</span><span>W</span><span>I</span><span>X</span>X</h1>
     <span id="tblstat" class="pill">loading values…</span>
+    <button class="btn" id="btnUndo" title="Take back your last move (replays the same dice)" disabled>↶ Undo</button>
     <button class="btn" id="btnValues" title="Show your chance to win for each option">Win %</button>
     <button class="btn" id="btnNew">New game</button>
   </header>
@@ -116,23 +118,26 @@ input[type=range]{padding:0;width:140px}
   <div class="field"><span>Bots</span><span><input id="nbots" type="range" min="1" max="5" value="3"> <b id="nbotsv">3</b></span></div>
   <div id="botsel"></div>
   <div class="field"><span>Show win chances</span><input id="optvals" type="checkbox" checked></div>
-  <p class="hint">Labels = your chance to win if you pick that option, estimated by simulating the rest of the game 1000× with the real bots (and the Expert line for you afterwards). ★ = best.</p>
+  <p class="hint">Labels = your chance to win if you pick that option, estimated by simulating the rest of the game 1000× with the real bots (and the Expert line for you afterwards). ★ = best. With RL bots at the table the simulation is slower: labels appear quickly and sharpen over a few seconds.<br>
+  RL bot = neural network trained to maximise its chance of winning (beats the Expert by 6–20 percentage points in simulation).</p>
   <div style="text-align:right;margin-top:12px"><button class="btn primary" id="btnStart">Start</button></div>
 </dialog>
-<dialog id="endd"><h2 id="endt">Game over</h2><div id="ranks"></div><div style="text-align:right;margin-top:12px"><button class="btn primary" id="btnAgain">Play again</button></div></dialog>
+<dialog id="endd"><h2 id="endt">Game over</h2><div id="ranks"></div><div style="text-align:right;margin-top:12px"><button class="btn" id="btnUndoEnd">↶ Undo last move</button> <button class="btn primary" id="btnAgain">Play again</button></div></dialog>
 
 <script src="qwixx-engine.js"></script>
 <script>
 const Q = window.Qwixx, $ = s => document.querySelector(s);
 const sleep = ms => new Promise(r => setTimeout(r, window.__fast ? 0 : ms));
 const NAMES = ['Ada', 'Bo', 'Cy', 'Di', 'Eli'];
-const DEFAULT_KINDS = ['expert', 'balanced', 'careful', 'greedy', 'patient'];
+const DEFAULT_KINDS = ['rl', 'expert', 'balanced', 'careful', 'greedy'];
 let G = null, showVals = true, pending = null, gameId = 0, tableOK = false;
+let snaps = [];                      // game state at the start of each turn (undo)
 
 /* ---------- value tables ---------- */
 Q.loadTable('table/', f => { $('#tblstat').textContent = 'loading values ' + Math.round(f * 100) + '%'; })
   .then(() => { tableOK = true; $('#tblstat').textContent = 'values ready'; $('#tblstat').classList.add('on'); render(); })
   .catch(e => { $('#tblstat').textContent = 'no value tables'; $('#tblstat').title = String(e); });
+Q.loadRLModel('rl/models/d1.json').catch(e => console.warn('RL model not loaded, RL bots play as Experts', e));
 
 /* ---------- setup ---------- */
 function buildBotSelectors() {
@@ -151,6 +156,7 @@ $('#btnStart').onclick = () => {
   startGame(kinds);
 };
 $('#btnAgain').onclick = () => { $('#endd').close(); $('#setup').showModal(); };
+$('#btnUndo').onclick = $('#btnUndoEnd').onclick = () => undo();
 
 /* ---------- drawing ---------- */
 const PIPS = { 1: [4], 2: [0, 8], 3: [0, 4, 8], 4: [0, 2, 6, 8], 5: [0, 2, 4, 6, 8], 6: [0, 2, 3, 5, 6, 8] };
@@ -212,8 +218,9 @@ function setActions(list) {
   $('#actions').innerHTML = '';
   list.forEach(a => { const b = document.createElement('button'); b.className = 'btn' + (a.primary ? ' primary' : ''); b.innerHTML = a.html; b.onclick = a.fn; $('#actions').appendChild(b); });
 }
-function logAdd(s) { G.log.unshift(s); G.log = G.log.slice(0, 7); $('#log').innerHTML = G.log.map(x => `<div>${x}</div>`).join(''); }
-function render(anim) { if (!G) return; renderOpps(); renderMe(); renderDice(anim); }
+function renderLog() { $('#log').innerHTML = G.log.map(x => `<div>${x}</div>`).join(''); }
+function logAdd(s) { G.log.unshift(s); G.log = G.log.slice(0, 7); renderLog(); }
+function render(anim) { if (!G) return; renderOpps(); renderMe(); renderDice(anim); $('#btnUndo').disabled = !snaps.some(x => x.decided); }
 
 /* ---------- decisions ---------- */
 $('#me').addEventListener('click', e => {
@@ -240,7 +247,7 @@ function refreshDecision() {
 async function computeWin(pd) {
   const cands = [...pd.options, null], keys = cands.map(c => (c ? c.row + '-' + c.n : 'skip'));
   pd.wp = {}; keys.forEach(k => { pd.wp[k] = { w: 0, n: 0 }; });
-  const base = (Math.random() * 2 ** 30) | 0, N = 1000, B = 50;
+  const base = (Math.random() * 2 ** 30) | 0, N = 1000, B = G.players.some(p => p.kind === 'rl') ? 10 : 50;   // RL bots: smaller chunks keep the page responsive
   for (let i = 0; i < N; i += B) {
     if (pending !== pd) return;
     cands.forEach((c, q) => { const r = pd.wp[keys[q]]; for (let j = i; j < i + B; j++) { r.w += Q.rollout(G, 0, pd.stage, c, base + j); r.n++; } });
@@ -255,17 +262,35 @@ function startGame(kinds) {
   if ($('#setup').open) $('#setup').close();
   const specs = [{ name: 'You', kind: 'human' }, ...kinds.map((k, i) => ({ name: NAMES[i], kind: k }))];
   G = Q.newGame(specs); G.turn = Math.floor(G.rng() * specs.length);
-  pending = null; const id = ++gameId; render(); setActions([]);
+  pending = null; snaps = []; const id = ++gameId; render(); setActions([]);
   $('#log').innerHTML = ''; G.log = [];
   loop(id);
 }
+/* ---------- undo: back to the start of the turn of your last decision; same dice, bots replay identically ---------- */
+function snapshot() {
+  return { players: JSON.parse(JSON.stringify(G.players)), closed: G.closed.slice(), turn: G.turn, rng: G.rng.getState(), log: G.log.slice(), decided: false };
+}
+function undo() {
+  let i = snaps.length - 1;
+  while (i >= 0 && !snaps[i].decided) i--;
+  if (i < 0) return;
+  const s = snaps[i]; snaps = snaps.slice(0, i);
+  Object.assign(G, { players: JSON.parse(JSON.stringify(s.players)), closed: s.closed.slice(), turn: s.turn, over: false, dice: null, plans: [], phase: 'idle', log: s.log.slice() });
+  G.rng.setState(s.rng);
+  if ($('#endd').open) $('#endd').close();
+  pending = null; const id = ++gameId; setActions([]); renderLog(); render();
+  loop(id);
+}
 async function loop(id) {
-  while (!G.over && id === gameId) {
-    const act = G.turn % G.players.length, actor = G.players[act];
+  const alive = () => id === gameId;
+  while (!G.over && alive()) {
+    const act = G.turn % G.players.length, actor = G.players[act], snap = snapshot();
+    snaps.push(snap); render();
     if (act === 0) { setStatus('Your turn', 'Roll the dice'); setActions([{ html: '🎲 Roll', primary: true, fn: () => { window.__roll && window.__roll(); } }]); G.dice = null; render(); await new Promise(r => { window.__roll = r; }); setActions([]); }
     else { setStatus(`${actor.name}'s turn`); await sleep(500); }
     if (id !== gameId) return;
     Q.rollDice(G); render(true); await sleep(act === 0 ? 350 : 700);
+    if (!alive()) return;
     const ws = Q.whiteSum(G);
     /* white phase: bots, then you */
     Q.botsWhite(G).forEach(m => logAdd(`${G.players[m.p].name} → ${label(m.row, m.n)}${m.lock ? ' 🔒' : ''}`));
@@ -273,9 +298,9 @@ async function loop(id) {
     const wopts = Q.whiteOptions(G, 0);
     if (wopts.length) {
       const ch = await ask('white', wopts, `White dice = <b>${ws}</b>`, act === 0 ? 'Mark the white sum in any row — or skip (colour dice come next)' : 'Mark the white sum in any row — or skip');
-      if (id !== gameId) return; pending = null;
+      if (id !== gameId) return; pending = null; snap.decided = true;
       if (ch) { const m = Q.doMark(G, 0, ch.row, ch.n); logAdd(`You → ${label(m.row, m.n)}${m.lock ? ' 🔒' : ''}`); }
-    } else { setStatus(`White dice = <b>${ws}</b>`, 'No legal white mark for you'); setActions([]); await sleep(act === 0 ? 700 : 450); }
+    } else { setStatus(`White dice = <b>${ws}</b>`, 'No legal white mark for you'); setActions([]); await sleep(act === 0 ? 700 : 450); if (!alive()) return; }
     Q.updateClosed(G).forEach(i => logAdd(`${label(i, '')} row is now closed`));
     render();
     /* colour phase (active player only) */
@@ -283,9 +308,9 @@ async function loop(id) {
       const copts = Q.colourOptions(G, 0);
       if (copts.length) {
         const ch = await ask('colour', copts, 'Colour dice', 'Pick one white die + one colour die: mark that number in the colour\'s row — or skip');
-        if (id !== gameId) return; pending = null;
+        if (id !== gameId) return; pending = null; snap.decided = true;
         if (ch) { const m = Q.doMark(G, 0, ch.row, ch.n); logAdd(`You → ${label(m.row, m.n)}${m.lock ? ' 🔒' : ''}`); }
-      } else { setStatus('Colour dice', 'No legal colour mark'); setActions([]); await sleep(700); }
+      } else { setStatus('Colour dice', 'No legal colour mark'); setActions([]); await sleep(700); if (!alive()) return; }
     } else {
       Q.botColour(G).forEach(m => logAdd(`${G.players[m.p].name} → ${label(m.row, m.n)}${m.lock ? ' 🔒' : ''}`));
     }
@@ -295,7 +320,7 @@ async function loop(id) {
     ev.closedNow.forEach(i => logAdd(`${label(i, '')} row is now closed`));
     render(); await sleep(350);
   }
-  if (id === gameId && G.over) finish();
+  if (alive() && G.over) { render(); finish(); }
 }
 function finish() {
   const sc = G.players.map((p, i) => ({ i, name: p.name, s: Q.scoreOf(G, i) })).sort((a, b) => b.s - a.s);
