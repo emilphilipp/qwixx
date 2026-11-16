@@ -3,17 +3,15 @@
 **Play it: https://emilphilipp.github.io/qwixx/** (first load downloads ~30 MB of value tables)
 
 Play Qwixx against 1-5 bots (Patient, Careful, Balanced, Greedy, Expert, **RL bot**) and optionally see, for every
-legal move, **your chance to win** if you pick it. Misclicked? **↶ Undo** takes back your last move (same dice).
+legal move, **your chance to win** if you pick it, according to the RL bot. Misclicked? **↶ Undo** takes back your last move (same dice).
 
 ## How the win chances are computed
 
-Score alone is the wrong target: a short game is won with a low score, a long one needs a high score.
-Each label is estimated by simulating the rest of the game 1000 times from that option, with every bot playing its
-real strategy and you playing the Expert line afterwards. All options share the same simulated dice
-(common random numbers), so differences between options are measured precisely. Simulating the players jointly matters:
-their final scores are strongly correlated through the shared dice, closed rows and the shared end of the game,
-so five separately estimated score distributions would give the wrong win probability.
-Calibration check (`node calib.js table 800`): predicted vs. actual win rate agrees within sampling noise.
+The labels are the **RL bot's** estimate of your chance to win for each option: its neural network scores the
+position after the move (see *RL bot* below), so the labels are instant. The network judges the position, not who
+your opponents are, so its absolute numbers are rougher than its ranking: compared with 1000 simulated games per
+option it is off by about 8 percentage points on average, but its favourite option costs only about 0.25 pp of win
+chance versus the best one. (`Q.rollout` / `calib.js` still provide the simulation-based estimate.)
 
 ## What is in here
 

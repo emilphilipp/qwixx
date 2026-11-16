@@ -100,7 +100,7 @@ input[type=range]{padding:0;width:140px}
     <h1><span>Q</span><span>W</span><span>I</span><span>X</span>X</h1>
     <span id="tblstat" class="pill">loading values…</span>
     <button class="btn" id="btnUndo" title="Take back your last move (replays the same dice)" disabled>↶ Undo</button>
-    <button class="btn" id="btnValues" title="Show your chance to win for each option">Win %</button>
+    <button class="btn" id="btnValues" title="Show the RL bot's win chance for each option">Win %</button>
     <button class="btn" id="btnNew">New game</button>
   </header>
   <div id="opps"></div>
@@ -118,14 +118,14 @@ input[type=range]{padding:0;width:140px}
   <div class="field"><span>Bots</span><span><input id="nbots" type="range" min="1" max="5" value="3"> <b id="nbotsv">3</b></span></div>
   <div id="botsel"></div>
   <div class="field"><span>Show win chances</span><input id="optvals" type="checkbox" checked></div>
-  <p class="hint">Labels = your chance to win if you pick that option, estimated by simulating the rest of the game 1000× with the real bots (and the Expert line for you afterwards). ★ = best. With RL bots at the table the simulation is slower: labels appear quickly and sharpen over a few seconds.<br>
+  <p class="hint">Labels = the RL bot's estimate of your chance to win if you pick that option (instant; a neural network, so it judges the position, not who your opponents are). ★ = its pick.<br>
   RL bot = neural network trained to maximise its chance of winning (beats the Expert by 6–20 percentage points in simulation).</p>
   <div style="text-align:right;margin-top:12px"><button class="btn primary" id="btnStart">Start</button></div>
 </dialog>
 <dialog id="endd"><h2 id="endt">Game over</h2><div id="ranks"></div><div style="text-align:right;margin-top:12px"><button class="btn" id="btnUndoEnd">↶ Undo last move</button> <button class="btn primary" id="btnAgain">Play again</button></div></dialog>
 
 <!-- bump ?v= when the engine changes: GitHub Pages lets browsers cache files for 10 min, and an old engine with a new page breaks -->
-<script src="qwixx-engine.js?v=2"></script>
+<script src="qwixx-engine.js?v=3"></script>
 <script>
 const Q = window.Qwixx, $ = s => document.querySelector(s);
 const sleep = ms => new Promise(r => setTimeout(r, window.__fast ? 0 : ms));
@@ -138,7 +138,7 @@ let snaps = [];                      // game state at the start of each turn (un
 Q.loadTable('table/', f => { $('#tblstat').textContent = 'loading values ' + Math.round(f * 100) + '%'; })
   .then(() => { tableOK = true; $('#tblstat').textContent = 'values ready'; $('#tblstat').classList.add('on'); render(); })
   .catch(e => { $('#tblstat').textContent = 'no value tables'; $('#tblstat').title = String(e); });
-if (Q.loadRLModel) Q.loadRLModel('rl/models/d1.json?v=1').catch(e => console.warn('RL model not loaded, RL bots play as Experts', e));
+if (Q.loadRLModel) Q.loadRLModel('rl/models/d1.json?v=1').then(() => { render(); refreshDecision(); }).catch(e => console.warn('RL model not loaded, RL bots play as Experts', e));
 
 /* ---------- setup ---------- */
 function buildBotSelectors() {
@@ -162,18 +162,18 @@ $('#btnUndo').onclick = $('#btnUndoEnd').onclick = () => undo();
 /* ---------- drawing ---------- */
 const PIPS = { 1: [4], 2: [0, 8], 3: [0, 4, 8], 4: [0, 2, 6, 8], 5: [0, 2, 4, 6, 8], 6: [0, 2, 3, 5, 6, 8] };
 const die = (n, cls = '', anim = false) => `<div class="die ${cls} ${anim ? 'rolling' : ''}">${Array.from({ length: 9 }, (_, i) => `<i class="${PIPS[n].includes(i) ? 'p' : ''}"></i>`).join('')}</div>`;
-function lookupVals() {              // win-probability labels for the current decision
+function lookupVals() {              // the RL network's win probabilities for the current decision
   const pd = pending;
-  if (!pd || !showVals || !tableOK || !pd.wp) return null;
-  const keys = Object.keys(pd.wp), n = pd.wp[keys[0]].n;
-  if (n < 100) return null;
-  const p = k => pd.wp[k].w / pd.wp[k].n, best = Math.max(...keys.map(p));
-  return { p, best, n, isBest: k => p(k) >= best - 1e-9 };
+  if (!pd || !showVals || !tableOK) return null;
+  if (!pd.wp) pd.wp = Q.rlWinProbs(G, 0, pd.stage);
+  if (!pd.wp) return null;
+  const p = k => pd.wp[k], best = Math.max(...Object.values(pd.wp));
+  return { p, best, isBest: k => p(k) >= best - 1e-9 };
 }
 function badge(vals, key) {
   if (!vals) return '';
   const pr = vals.p(key), d = (pr - vals.best) * 100, cls = d > -0.5 ? 's' : d > -3 ? 'g' : d > -8 ? 'a' : 'r';
-  return `<span class="val ${cls}" title="chance to win if you pick this (then play the Expert line): ${(pr * 100).toFixed(1)}%, ${vals.n} simulated games">${(pr * 100).toFixed(0)}%${vals.isBest(key) ? ' ★' : ''}</span>`;
+  return `<span class="val ${cls}" title="RL bot's estimate of your chance to win if you pick this: ${(pr * 100).toFixed(1)}%">${(pr * 100).toFixed(0)}%${vals.isBest(key) ? ' ★' : ''}</span>`;
 }
 function renderMe() {
   const me = G.players[0], vals = lookupVals(), legal = pending ? pending.options : [];
@@ -233,7 +233,6 @@ function ask(stage, options, prompt, sub) {
     pending = { stage, options, resolve, wp: null, prompt, sub };
     setActions([{ html: '<span id="skiplbl">Skip</span>', fn: () => { const p = pending; pending = null; p.resolve(null); } }]);
     refreshDecision();
-    if (tableOK) computeWin(pending);
   });
 }
 function refreshDecision() {
@@ -241,20 +240,8 @@ function refreshDecision() {
   const pen = pd.stage === 'colour' && G.players[0].turnMarks === 0, vals = lookupVals(), sk = document.getElementById('skiplbl');
   if (sk) sk.innerHTML = 'Skip' + (pen ? ' (−5 penalty)' : '') + (vals ? ' ' + badge(vals, 'skip').replace('class="val', 'style="position:static;margin-left:6px" class="val') : '');
   let sub = pd.sub;
-  if (showVals && tableOK) sub += vals ? ` · labels = your chance to win (${vals.n} simulated games each)` : ' · simulating win chances…';
+  if (vals) sub += ' · labels = RL bot\'s win chance for you';
   setStatus(pd.prompt, sub); renderMe();
-}
-/* simulate the rest of the game for every option, same dice per option (fair comparison) */
-async function computeWin(pd) {
-  const cands = [...pd.options, null], keys = cands.map(c => (c ? c.row + '-' + c.n : 'skip'));
-  pd.wp = {}; keys.forEach(k => { pd.wp[k] = { w: 0, n: 0 }; });
-  const base = (Math.random() * 2 ** 30) | 0, N = 1000, B = G.players.some(p => p.kind === 'rl') ? 10 : 50;   // RL bots: smaller chunks keep the page responsive
-  for (let i = 0; i < N; i += B) {
-    if (pending !== pd) return;
-    cands.forEach((c, q) => { const r = pd.wp[keys[q]]; for (let j = i; j < i + B; j++) { r.w += Q.rollout(G, 0, pd.stage, c, base + j); r.n++; } });
-    if (i + B >= 100) refreshDecision();
-    await new Promise(r => setTimeout(r, 0));
-  }
 }
 const label = (i, n) => `<b style="color:var(--${Q.COLORS[i]})">${Q.COLORS[i]} ${n}</b>`;
 

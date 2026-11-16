@@ -295,6 +295,32 @@
     return { ctx, opts, best, chosen };
   }
   const rlPlan = (G, me, active, w1, w2, cdice) => rlDecide(G, me, active, w1, w2, cdice, RLM).chosen;
+  /* the RL network's P(win) for each choice a player faces in the UI ({key: p}, key 'row-n' or 'skip').
+     stage 'white': a white mark is worth its best colour follow-up (if active); 'colour': rows already hold the white mark. */
+  function rlWinProbs(G, me, stage) {
+    if (!RLM || !Tbl.ready) return null;
+    const pl = G.players[me], active = me === G.active, d = G.dice, ctx = rlContext(G, me);
+    let opts;
+    if (stage === 'white') opts = enumOptions(pl.rows, G.closed, d.w[0], d.w[1], d.c, active);
+    else {
+      opts = [{ w: null, c: null, rows: pl.rows, nm: pl.turnMarks }];
+      for (const o of colourOptions(G, me)) opts.push({ w: null, c: o, rows: applyRow(pl.rows, o.row, tr(o.row, pl.rows[o.row], o.n)), nm: 1 });
+    }
+    let best = opts[0];
+    for (const o of opts) {
+      o.k = pl.k + (active && o.nm === 0 ? 1 : 0);
+      o.value = stateValue(o.rows, o.k, ctx.lam);
+      if (o.value > best.value + 1e-9) best = o;
+    }
+    const x = new Float64Array(RL_NF), out = {};
+    for (const o of opts) {
+      rlFeatures(G, me, active, ctx, o, best.value, x, 0);
+      const p = 1 / (1 + Math.exp(-rlForward(RLM, x, 0)));
+      const m = stage === 'white' ? o.w : o.c, key = m ? m.row + '-' + m.n : 'skip';
+      if (!(key in out) || p > out[key]) out[key] = p;
+    }
+    return out;
+  }
 
   /* ---------- game ---------- */
   const BOT_KINDS = {
@@ -471,6 +497,6 @@
     loadTable, loadTableFromDir, setTable, stateValue, threats, enumOptions, heurPlan, expertPlan,
     newGame, rollDice, doMark, whiteOptions, colourOptions, botsWhite, botColour, finishTurn,
     scoreOf, rowScores, optionValues, whiteSum, Fint, F, KAPPA, updateClosed, rollout, mulberry32,
-    simTurn, isOver, markL, RL_NF, prepareModel, setRLModel, loadRLModel, rlContext, rlFeatures, rlForward, rlDecide, rlPlan,
+    simTurn, isOver, markL, RL_NF, prepareModel, setRLModel, loadRLModel, rlContext, rlFeatures, rlForward, rlDecide, rlPlan, rlWinProbs,
   };
 });
